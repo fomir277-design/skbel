@@ -45,12 +45,8 @@ last_leaderboard_sync_time = time.time()
 
 # ================= ЛОКАЛЬНАЯ БД (SQLITE) =================
 
-
 def get_db_connection():
-    # Указываем полный путь к твоему файлу базы
     db_path = 'database.db'
-
-        
     conn = sqlite3.connect(db_path, timeout=10)
     return conn
 
@@ -117,7 +113,7 @@ def init_db():
 
 init_db()
 
-# Фоновый чекер КД
+# Фоновый чекер КД и Очереди
 def cooldown_checker():
     global last_empty_sync_time
     global last_leaderboard_sync_time
@@ -147,15 +143,47 @@ def cooldown_checker():
                     bot.send_message(tg_id, "⏳ До окончания КД стройки осталось <b>10 минут</b>!")
                     cursor.execute("UPDATE cooldowns SET notified_10 = 1 WHERE ID_TG = ?", (tg_id,))
             
+            # --- БЛОК АВТОМАТИЧЕСКОГО КИКА ИЗ ОЧЕРЕДИ ЧЕРЕЗ 2 ЧАСА ---
+            kicked_any = False
+            cursor.execute("SELECT ID_TG, time_started FROM queue WHERE status = 'Выполняет'")
+            active_workers = cursor.fetchall()
+            
+            for worker_id, t_start in active_workers:
+                if not t_start: continue
+                try:
+                    # Поддержка старого формата HH:MM и нового YYYY-MM-DD HH:MM
+                    if len(t_start) == 5:
+                        start_dt = datetime.datetime.strptime(t_start, "%H:%M")
+                        start_dt = now.replace(hour=start_dt.hour, minute=start_dt.minute, second=0, microsecond=0)
+                        if start_dt > now:
+                            start_dt -= datetime.timedelta(days=1)
+                    else:
+                        start_dt = datetime.datetime.strptime(t_start, "%Y-%m-%d %H:%M")
+                        start_dt = pytz.timezone('Europe/Moscow').localize(start_dt)
+                    
+                    # Если прошло 2 часа (7200 секунд) или больше
+                    if (now - start_dt).total_seconds() >= 7200:
+                        cursor.execute("DELETE FROM queue WHERE ID_TG = ?", (worker_id,))
+                        kicked_any = True
+                        try:
+                            bot.send_message(worker_id, "⚠️ <b>Вы были исключены из очереди!</b>\nВы находились в статусе «Выполняет» более 2 часов. Если вы закончили стройку, не забывайте вовремя подавать отчёт, чтобы не задерживать других.")
+                        except Exception: pass
+                except Exception: pass
+            # --------------------------------------------------------
+
             # Блок обработки глобального КД
             cursor.execute("SELECT value FROM settings WHERE key = 'global_cooldown_end'")
             global_cd_row = cursor.fetchone()
             
+            has_active_cd = False
             if global_cd_row:
                 try:
                     cd_end_time = datetime.datetime.strptime(global_cd_row[0], "%Y-%m-%d %H:%M")
                     cd_end_time = pytz.timezone('Europe/Moscow').localize(cd_end_time)
                     remaining_g_mins = (cd_end_time - now).total_seconds() / 60
+                    
+                    if remaining_g_mins > 0:
+                        has_active_cd = True
                     
                     cursor.execute("SELECT value FROM settings WHERE key = 'global_notified_10'")
                     g10 = cursor.fetchone()
@@ -165,7 +193,6 @@ def cooldown_checker():
                     g0 = cursor.fetchone()
                     g0_val = g0[0] if g0 else '0'
                     
-                    # Получаем список всех, кто в очереди, чтобы отправить им уведомления в ЛС
                     cursor.execute("SELECT ID_TG FROM queue")
                     queued_users = [row[0] for row in cursor.fetchall()]
                         
@@ -191,6 +218,10 @@ def cooldown_checker():
             conn.commit()
             conn.close()
             
+            # Если кто-то был кикнут автоматически, принудительно синхронизируем форум
+            if kicked_any:
+                sync_queue_to_forum()
+            
             current_ts = time.time()
             if q_count == 0 and not has_active_cd:
                 if current_ts - last_empty_sync_time >= 45 * 60:
@@ -208,7 +239,7 @@ def cooldown_checker():
                 except Exception as e:
                     print(f"Ошибка автообновления лидерборда: {e}")
                     
-        except Exception as e:
+        except Exception:
             pass 
 
 def calculate_cd_end(cd_str, current_time):
@@ -241,6 +272,7 @@ def set_bot_commands():
     commands = [
         types.BotCommand("start", "🏠 Главное меню / Перезапуск"),
         types.BotCommand("leave", "❌ Покинуть очередь"),
+        types.BotCommand("kick", "🥾 Выкинуть из очереди (Админ)"),
         types.BotCommand("premii", "🏆 Список на премии (Админ)"),
         types.BotCommand("clearstats", "🧹 Выдать премии и очистить статистику (Админ)"),
         types.BotCommand("del", "🗑 Удалить игрока из БД (Админ)"),
@@ -304,7 +336,10 @@ def sync_queue_to_forum():
                 status = item[1]
                 t_booked = item[2]
                 t_started = item[3]
-                started_info = f" | 🕒 Начал: {t_started}" if t_started else ""
+                
+                # Для красивого отображения оставляем только ЧЧ:ММ
+                display_time = t_started.split()[-1] if t_started and ' ' in t_started else t_started
+                started_info = f" | 🕒 Начал: {display_time}" if t_started else ""
                 
                 emoji = "🏗" if status == 'Выполняет' else "⏳"
                 text += f"{idx}. {emoji} <b>{nick}</b> — <code>{status}</code> (Занял: {t_booked}{started_info})\n"
@@ -620,7 +655,6 @@ def handle_report_confirmation(call):
         
         cd_end = calculate_cd_end(data['cd'], msk_now)
         
-        # Надежный SQLite Upsert (совместимо со всеми версиями)
         cursor.execute("INSERT OR REPLACE INTO cooldowns (ID_TG, end_time, notified_10, notified_5, notified_0) VALUES (?, ?, 0, 0, 0)", (tg_id, cd_end))
         cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('global_cooldown_end', ?)", (cd_end,))
         cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('global_notified_10', '0')")
@@ -647,7 +681,7 @@ def handle_report_confirmation(call):
                 types.InputMediaPhoto(data['photo_end'], caption=forum_text, parse_mode='HTML')
             ], message_thread_id=APPROVED_TOPIC_ID)
             bot.send_message(tg_id, f"✅ Отчёт успешно опубликован на форум! Ваше КД зафиксировано до {cd_end}.", reply_markup=main_menu_markup(tg_id))
-        except Exception as e:
+        except Exception:
             bot.send_message(tg_id, "⚠️ Отчёт принят в БД, но возникла ошибка публикации медиа на форуме.", reply_markup=main_menu_markup(tg_id))
 
         sync_queue_to_forum()
@@ -696,7 +730,9 @@ def handle_booking(message):
 @bot.message_handler(func=lambda message: message.text == "🚀 Приступить к стройке")
 def start_working(message):
     tg_id = message.from_user.id
-    now = get_msk_time().strftime("%H:%M")
+    msk_now = get_msk_time()
+    now_display = msk_now.strftime("%H:%M")
+    now_full = msk_now.strftime("%Y-%m-%d %H:%M") # Сохраняем полный таймстамп для автокика
     
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -704,9 +740,9 @@ def start_working(message):
     first = cursor.fetchone()
     
     if first and first[0] == tg_id:
-        cursor.execute("UPDATE queue SET status = 'Выполняет', time_started = ? WHERE ID_TG = ?", (now, tg_id))
+        cursor.execute("UPDATE queue SET status = 'Выполняет', time_started = ? WHERE ID_TG = ?", (now_full, tg_id))
         conn.commit()
-        bot.send_message(message.chat.id, f"🏗 Вы переведены в статус работы в <code>{now}</code>. Успешной стройки!", reply_markup=main_menu_markup(tg_id))
+        bot.send_message(message.chat.id, f"🏗 Вы переведены в статус работы в <code>{now_display}</code>. Успешной стройки!", reply_markup=main_menu_markup(tg_id))
         sync_queue_to_forum()
     else:
         bot.send_message(message.chat.id, "❗️ Вы не первый в списке! Дождитесь продвижения очереди.", reply_markup=main_menu_markup(tg_id))
@@ -759,7 +795,7 @@ def update_leaderboard():
         print(f"Ошибка при обновлении лидерборда: {e}")
 
 # ================= АДМИНСКИЕ КОМАНДЫ =================
-@bot.message_handler(commands=['del', 'stop', 'premii', 'clearstats', 'upd_leaderboard', 'export_logs'])
+@bot.message_handler(commands=['del', 'stop', 'premii', 'clearstats', 'upd_leaderboard', 'export_logs', 'kick'])
 def admin_commands(message):
     if not is_allowed(message): return
     if message.from_user.id not in ADMIN_IDS: return
@@ -833,8 +869,7 @@ def admin_commands(message):
         
         try:
             bot.send_message(FORUM_CHAT_ID, report_text, message_thread_id=PREMII_TOPIC_ID, parse_mode='HTML')
-        except Exception as e:
-            pass
+        except Exception: pass
 
         cursor.execute("UPDATE users SET collector = 0, otchetov_za_nedelyu = 0")
         conn.commit()
@@ -860,6 +895,41 @@ def admin_commands(message):
             sync_queue_to_forum()
         except ValueError:
             bot.send_message(message.chat.id, "ID должен быть числом.")
+
+    elif cmd == '/kick':
+        if not args:
+            bot.send_message(message.chat.id, "❌ Использование: <code>/kick [ID_TG или Игровой_Ник]</code>")
+            conn.close()
+            return
+            
+        target = " ".join(args)
+        user_id = None
+        
+        # Если ввели число (ID_TG), используем его напрямую
+        if target.isdigit():
+            user_id = int(target)
+        else:
+            # Иначе ищем ID_TG по Nick_Name в таблице пользователей
+            cursor.execute("SELECT ID_TG FROM users WHERE Nick_Name = ?", (target,))
+            row = cursor.fetchone()
+            if row:
+                user_id = row[0]
+                
+        if user_id:
+            cursor.execute("SELECT id FROM queue WHERE ID_TG = ?", (user_id,))
+            in_q = cursor.fetchone()
+            if in_q:
+                cursor.execute("DELETE FROM queue WHERE ID_TG = ?", (user_id,))
+                conn.commit()
+                bot.send_message(message.chat.id, f"🥾 Игрок <b>{target}</b> успешно кикнут из очереди.")
+                try:
+                    bot.send_message(user_id, "❌ Вы были принудительно исключены из очереди администратором.")
+                except Exception: pass
+                sync_queue_to_forum()
+            else:
+                bot.send_message(message.chat.id, f"❗️ Игрок <b>{target}</b> на данный момент не стоит в очереди.")
+        else:
+            bot.send_message(message.chat.id, f"❌ Пользователь с именем или ID <b>{target}</b> не найден в базе данных.")
 
     conn.commit()
     conn.close()
