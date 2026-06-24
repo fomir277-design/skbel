@@ -7,8 +7,16 @@ import logging
 import re
 import threading
 import time
-import os
 import requests
+import os
+from dotenv import load_dotenv
+
+# Загружаем переменные из .env (если он есть локально)
+load_dotenv()
+
+# Получаем токен из переменной окружения
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+
 
 # === ЖЕСТКОЕ И ПОЛНОЕ УДАЛЕНИЕ СИСТЕМНЫХ ПРОКСИ ИЗ ПАМЯТИ БОТА ===
 for env_var in ['http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 
@@ -20,7 +28,6 @@ telebot_logger.setLevel(logging.CRITICAL)
 logging.getLogger('urllib3').setLevel(logging.CRITICAL)
 
 # ================= НАСТРОЙКИ БОТА =================
-BOT_TOKEN = '8851806070:AAHNdr-RCXC92uZYimYnoTHllIO2Wv2jK_M'
 ADMIN_GROUP_ID = -1003749193820 
 ADMIN_IDS = [6118149728, 6615178975, 5955159206]
 
