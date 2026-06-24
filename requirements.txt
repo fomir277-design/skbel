@@ -1,3 +1,4 @@
 pyTelegramBotAPI
 pytz
-psycopg2-binary
+requests
+
