@@ -10,6 +10,25 @@ import time
 import requests
 import os
 from dotenv import load_dotenv
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# --- ОБМАНКА ДЛЯ BACK4APP ---
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+def run_dummy_server():
+    server = HTTPServer(('0.0.0.0', 8080), DummyHandler)
+    server.serve_forever()
+
+# Запускаем сервер-обманку в отдельном потоке
+threading.Thread(target=run_dummy_server, daemon=True).start()
+# -----------------------------
+
+
 
 # Загружаем переменные из .env (если он есть локально)
 load_dotenv()
